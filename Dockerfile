@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY main.py .
-COPY .env.example .
+COPY .env.docker .
 
 # Create necessary directories
 RUN mkdir -p /app/backups /app/logs
