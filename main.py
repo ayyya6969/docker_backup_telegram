@@ -4,6 +4,8 @@ from datetime import datetime
 import tarfile
 import telebot
 import subprocess
+import json
+import hashlib
 from dotenv import load_dotenv
 
 # Load environment variables from .env file if it exists
@@ -67,11 +69,124 @@ if not os.path.exists(TMP_DIR):
         TMP_DIR = os.getcwd()
 logging.debug("TMP_DIR: [%s]", TMP_DIR)
 
+# Backup state file to track previous backup info
+BACKUP_STATE_FILE = os.path.join(os.path.dirname(__file__), "backup_state.json")
+logging.debug("BACKUP_STATE_FILE: [%s]", BACKUP_STATE_FILE)
+
 # Database configuration
 DB_CONTAINERS = os.environ.get('DB_CONTAINERS', '').split(',') if os.environ.get('DB_CONTAINERS') else []
 DB_CONTAINERS = [container.strip() for container in DB_CONTAINERS if container.strip()]
 logging.debug("DB_CONTAINERS: [%s]", DB_CONTAINERS)
 
+
+
+# Function to get directory size and modification info
+def get_directory_info(directory_path):
+    """
+    Get directory size and modification time info for change detection
+    """
+    try:
+        total_size = 0
+        file_count = 0
+        latest_mtime = 0
+        
+        # Create a hash of directory structure and sizes
+        dir_hash = hashlib.md5()
+        
+        for root, dirs, files in os.walk(directory_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                try:
+                    stat_info = os.stat(file_path)
+                    file_size = stat_info.st_size
+                    file_mtime = stat_info.st_mtime
+                    
+                    total_size += file_size
+                    file_count += 1
+                    latest_mtime = max(latest_mtime, file_mtime)
+                    
+                    # Add file info to hash (relative path + size + mtime)
+                    rel_path = os.path.relpath(file_path, directory_path)
+                    dir_hash.update(f"{rel_path}:{file_size}:{file_mtime}".encode())
+                    
+                except (OSError, IOError) as e:
+                    logging.warning("Cannot access file [%s]: %s", file_path, str(e))
+                    continue
+        
+        return {
+            'size': total_size,
+            'file_count': file_count,
+            'latest_mtime': latest_mtime,
+            'content_hash': dir_hash.hexdigest()
+        }
+    except Exception as e:
+        logging.error("Error getting directory info for [%s]: %s", directory_path, str(e))
+        return None
+
+# Function to load backup state
+def load_backup_state():
+    """Load previous backup state from JSON file"""
+    try:
+        if os.path.exists(BACKUP_STATE_FILE):
+            with open(BACKUP_STATE_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logging.warning("Cannot load backup state: %s", str(e))
+    return {}
+
+# Function to save backup state
+def save_backup_state(state):
+    """Save current backup state to JSON file"""
+    try:
+        with open(BACKUP_STATE_FILE, 'w') as f:
+            json.dump(state, f, indent=2)
+        logging.debug("Backup state saved to [%s]", BACKUP_STATE_FILE)
+    except Exception as e:
+        logging.error("Cannot save backup state: %s", str(e))
+
+
+# Function to check if volume needs backup
+def volume_needs_backup(volume_path, volume_name, previous_state):
+    """
+    Check if volume has changed since last backup
+    """
+    current_info = get_directory_info(volume_path)
+    if not current_info:
+        logging.warning("Cannot get info for volume [%s], will backup anyway", volume_name)
+        return True, current_info
+    
+    if volume_name not in previous_state:
+        logging.info("Volume [%s] - first time backup", volume_name)
+        return True, current_info
+    
+    prev_info = previous_state[volume_name]
+    
+    # Check if content has changed
+    if current_info['content_hash'] != prev_info.get('content_hash'):
+        logging.info("Volume [%s] - content changed (hash: %s -> %s)", 
+                    volume_name, prev_info.get('content_hash', 'none')[:8], 
+                    current_info['content_hash'][:8])
+        return True, current_info
+    
+    # Check if size changed significantly
+    size_diff = abs(current_info['size'] - prev_info.get('size', 0))
+    size_change_percent = (size_diff / max(prev_info.get('size', 1), 1)) * 100
+    
+    if size_change_percent > 1:  # More than 1% size change
+        logging.info("Volume [%s] - size changed by %.1f%% (%d -> %d bytes)", 
+                    volume_name, size_change_percent, 
+                    prev_info.get('size', 0), current_info['size'])
+        return True, current_info
+    
+    # Check if files were modified recently
+    prev_mtime = prev_info.get('latest_mtime', 0)
+    if current_info['latest_mtime'] > prev_mtime:
+        logging.info("Volume [%s] - files modified (latest: %s)", 
+                    volume_name, datetime.fromtimestamp(current_info['latest_mtime']))
+        return True, current_info
+    
+    logging.info("Volume [%s] - no changes detected, skipping backup", volume_name)
+    return False, current_info
 
 # Function to compress a folder
 def MakeTar(source_dir, output_filename):
@@ -258,6 +373,12 @@ if __name__ == '__main__':
                     logging.debug("Database dump file deleted: [%s]", dump_file)
                 except Exception as retEx:
                     logging.error("Cannot send database dump [%s]: %s", dump_file, str(retEx))
+    
+    # Load previous backup state for incremental backup
+    logging.info("Loading previous backup state...")
+    previous_state = load_backup_state()
+    current_state = previous_state.copy()  # Start with previous state
+    
     # Process path(s) list
     for singleLocation in DOCKER_VOLUME_DIRECTORIES:
         try:
@@ -272,24 +393,90 @@ if __name__ == '__main__':
             # Check if it is a folder
             if os.path.isdir(folderToCompress):
                 logging.debug("Found valid folder: " + folderToCompress)
+                
+                # Check if volume needs backup (incremental backup)
+                needs_backup, volume_info = volume_needs_backup(folderToCompress, singleSubfolder, previous_state)
+                
+                if not needs_backup:
+                    logging.info("Skipping backup for volume [%s] - no changes detected", singleSubfolder)
+                    # Update current info but keep previous backup timestamp
+                    if volume_info:
+                        current_state[singleSubfolder] = {**volume_info, 
+                                                         'last_backup': previous_state.get(singleSubfolder, {}).get('last_backup')}
+                    continue
+                
                 archiveName = singleSubfolder + "-" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".tar.gz"
                 outputPath = os.path.join(TMP_DIR, archiveName)
+                
+                logging.info("Backing up changed volume: [%s]", singleSubfolder)
                 if (MakeTar(folderToCompress, outputPath)):
-                    logging.info("Succesfully compressed: [" + outputPath + "]")
+                    logging.info("Successfully compressed: [" + outputPath + "]")
                     # Send archive
                     try:
                         bot.send_document(TELEGRAM_DEST_CHAT, open(outputPath, 'rb'))
-                        logging.debug("Document: [" + outputPath + "] was sent succesfully")
+                        logging.info("Document: [" + outputPath + "] was sent successfully")
+                        # Only update state after successful backup and transmission
+                        current_state[singleSubfolder] = {**volume_info, 'last_backup': datetime.now().isoformat()}
                     except Exception as retEx:
                         logging.error("Cannot send document: [" + str(retEx) + "]")
+                        # Don't update state if transmission failed
+                        if volume_info:
+                            current_state[singleSubfolder] = volume_info
                     # Delete archive
                     try:
                         os.remove(outputPath)
-                        logging.debug("File: [" + outputPath + "] was deleted succesfully")
+                        logging.debug("File: [" + outputPath + "] was deleted successfully")
                     except Exception as retEx:
-                        logging.error("Error while deleting: [" + retEx + "]")
+                        logging.error("Error while deleting: [" + str(retEx) + "]")
                 else:
                     logging.error("Cannot compress: [" + outputPath + "]")
+                    # Don't update state if compression failed
+                    if volume_info:
+                        current_state[singleSubfolder] = volume_info
+    
+    # Save updated backup state
+    save_backup_state(current_state)
+    
+    # Send summary message to Telegram
+    backed_up_volumes = [vol for vol, info in current_state.items() 
+                        if info and 'last_backup' in info]
+    skipped_volumes = [vol for vol, info in current_state.items() 
+                      if info and 'last_backup' not in info]
+    
+    summary_message = f"🔄 **Backup Summary**\n\n"
+    
+    if backed_up_volumes:
+        summary_message += f"✅ **Backed up volumes ({len(backed_up_volumes)}):**\n"
+        for vol in backed_up_volumes:
+            size_mb = current_state[vol]['size'] / (1024 * 1024)
+            file_count = current_state[vol]['file_count']
+            summary_message += f"• `{vol}` ({size_mb:.1f} MB, {file_count} files)\n"
+        summary_message += "\n"
+    
+    if skipped_volumes:
+        summary_message += f"⏭️ **Skipped volumes ({len(skipped_volumes)}) - no changes:**\n"
+        for vol in skipped_volumes:
+            size_mb = current_state[vol]['size'] / (1024 * 1024)
+            summary_message += f"• `{vol}` ({size_mb:.1f} MB)\n"
+        summary_message += "\n"
+    
+    if not backed_up_volumes and not skipped_volumes:
+        summary_message += "ℹ️ No volumes found to process.\n\n"
+    
+    # Add database info if any were dumped
+    if dumped_containers:
+        summary_message += f"🗄️ **Database dumps ({len(dumped_containers)}):**\n"
+        for container in dumped_containers:
+            summary_message += f"• `{container}`\n"
+        summary_message += "\n"
+    
+    summary_message += f"📅 Completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    
+    try:
+        bot.send_message(TELEGRAM_DEST_CHAT, summary_message, parse_mode='Markdown')
+        logging.info("Backup summary sent to Telegram")
+    except Exception as retEx:
+        logging.error("Cannot send summary message: [%s]", str(retEx))
 
     try:
         # Send log file

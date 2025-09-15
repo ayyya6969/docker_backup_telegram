@@ -45,6 +45,7 @@ tmp/
 *.tar.gz
 *.sql
 *.dump
+backup_state.json
 
 # IDE
 .vscode/

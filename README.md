@@ -9,7 +9,9 @@ Automated backup solution for Docker volumes and databases with Telegram notific
 - 📱 **Telegram Integration**: Sends backup files via Telegram bot
 - ⏰ **Cron Scheduling**: Easy automated scheduling with Linux cron
 - 🔍 **Smart Detection**: Automatically finds database containers with volumes in specified directories
+- ⚡ **Incremental Backups**: Only backs up volumes that have changed (smart change detection)
 - 🧹 **Cleanup**: Removes temporary files after successful transmission
+- 📊 **Detailed Reports**: Telegram summaries showing what was backed up vs skipped
 - 📝 **Comprehensive Logging**: Detailed logs for monitoring and troubleshooting
 
 ## Quick Start
@@ -35,6 +37,7 @@ Automated backup solution for Docker volumes and databases with Telegram notific
    chmod +x setup_cron.sh
    ./setup_cron.sh
    ```
+
 
 ## Configuration
 
@@ -82,23 +85,27 @@ Copy `.env.example` to `.env` and configure:
 
 ```
 backup/
-├── main.py              # Main backup script
-├── requirements.txt     # Python dependencies
-├── .env                 # Configuration (create from .env.example)
-├── .env.example         # Environment template
-├── .gitignore          # Git ignore rules
-├── setup_cron.sh       # Cron setup script
-├── README.md           # This file
-└── README_CRON.md      # Cron-specific documentation
+├── main.py                    # Main backup script
+├── requirements.txt           # Python dependencies
+├── .env                       # Configuration (create from .env.example)
+├── .env.example               # Environment template
+├── .gitignore                 # Git ignore rules
+├── setup_cron.sh              # Cron setup script
+├── README.md                  # This file
+├── README_CRON.md             # Cron-specific documentation
+└── backup_state.json          # Incremental backup state (auto-generated)
 ```
 
 ## Usage Examples
 
 ### Manual Backup
+
+**Option 1: Direct script run**
 ```bash
 # Run once
 python main.py
 ```
+
 
 ### Scheduled Backup
 ```bash
@@ -186,6 +193,7 @@ bot.send_message(os.environ.get('BOT_DEST'), 'Test message')
    - Verify container names: `docker ps`
    - Check database user permissions
    - Review container logs: `docker logs <container>`
+
 
 ### Debug Mode
 ```bash
