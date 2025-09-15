@@ -16,9 +16,10 @@ Automated backup solution for Docker volumes and databases with Telegram notific
 
 ## Quick Start
 
-1. **Install dependencies**:
+1. **Setup virtual environment**:
    ```bash
-   pip install -r requirements.txt
+   chmod +x setup_venv.sh
+   ./setup_venv.sh
    ```
 
 2. **Configure environment**:
@@ -29,13 +30,14 @@ Automated backup solution for Docker volumes and databases with Telegram notific
 
 3. **Run backup manually**:
    ```bash
+   source backup_env/bin/activate
    python main.py
    ```
 
 4. **Setup automated backups**:
    ```bash
-   chmod +x setup_cron.sh
-   ./setup_cron.sh
+   chmod +x setup_cron_venv.sh
+   ./setup_cron_venv.sh
    ```
 
 
@@ -90,7 +92,9 @@ backup/
 ├── .env                       # Configuration (create from .env.example)
 ├── .env.example               # Environment template
 ├── .gitignore                 # Git ignore rules
-├── setup_cron.sh              # Cron setup script
+├── setup_venv.sh              # Virtual environment setup
+├── setup_cron_venv.sh         # Cron setup with venv
+├── activate.sh                # Helper to activate venv
 ├── README.md                  # This file
 ├── README_CRON.md             # Cron-specific documentation
 └── backup_state.json          # Incremental backup state (auto-generated)
@@ -100,17 +104,23 @@ backup/
 
 ### Manual Backup
 
-**Option 1: Direct script run**
+**Direct script run**
 ```bash
-# Run once
+# Activate virtual environment
+source backup_env/bin/activate
+
+# Run backup
 python main.py
+
+# Deactivate when done
+deactivate
 ```
 
 
 ### Scheduled Backup
 ```bash
-# Setup daily backup at 2 AM
-./setup_cron.sh
+# Setup daily backup at 2 AM (with virtual environment)
+./setup_cron_venv.sh
 
 # View cron jobs
 crontab -l
@@ -167,10 +177,14 @@ bot.send_message(os.environ.get('BOT_DEST'), 'Test message')
 
 ### Common Issues
 
-1. **Python not found**:
+1. **Python environment issues**:
    ```bash
-   which python3
-   sudo apt install python3 python3-pip
+   # Install required system packages
+   sudo apt update
+   sudo apt install python3 python3-venv python3-pip python3-full
+   
+   # Recreate virtual environment
+   ./setup_venv.sh
    ```
 
 2. **Docker permission denied**:
