@@ -12,40 +12,35 @@ Automated backup solution for Docker volumes and databases with Telegram notific
 - ⚡ **Incremental Backups**: Only backs up volumes that have changed (smart change detection)
 - 🧹 **Cleanup**: Removes temporary files after successful transmission
 - 📊 **Detailed Reports**: Telegram summaries showing what was backed up vs skipped
+- ☁️ **B2 Integration**: All backup files stored in Backblaze B2 cloud storage
 - 📝 **Comprehensive Logging**: Detailed logs for monitoring and troubleshooting
 
-## Quick Start
+## 🐳 Docker Deployment
 
-1. **Setup virtual environment**:
-   ```bash
-   chmod +x setup_venv.sh
-   ./setup_venv.sh
-   ```
+```bash
+# Clone repository
+git clone https://github.com/ayyya6969/docker_backup_telegram.git
+cd docker_backup_telegram
 
-2. **Configure environment**:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your settings
-   ```
+# Run automated setup
+chmod +x docker-setup.sh
+./docker-setup.sh
+```
 
-3. **Run backup manually**:
-   ```bash
-   source backup_env/bin/activate
-   python main.py
-   ```
-
-4. **Setup automated backups**:
-   ```bash
-   chmod +x setup_cron_venv.sh
-   ./setup_cron_venv.sh
-   ```
+**What it does:**
+- ✅ Build Docker image with all dependencies
+- ✅ Create configuration from template  
+- ✅ Validate Telegram and Backblaze B2 settings
+- ✅ Start backup service with health monitoring
+- ✅ Schedule daily backups at 2:00 AM
+- ✅ Send startup notification via Telegram
 
 
 ## Configuration
 
 ### Environment Variables
 
-Copy `.env.example` to `.env` and configure:
+Copy `.env.docker` to `.env` and configure:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
@@ -55,6 +50,12 @@ Copy `.env.example` to `.env` and configure:
 | `TMP_DIR` | Temporary directory for backups | `/tmp/backups` |
 | `DB_CONTAINERS` | Manual database container list (optional) | `mysql_db,postgres_app` |
 | `CUST_MSG` | Custom message prefix (optional) | `Production Backup` |
+| `S3_ENABLED` | Enable Backblaze B2 uploads (required) | `true` |
+| `S3_BUCKET` | Backblaze B2 bucket name | `my-docker-backups` |
+| `S3_PREFIX` | B2 object prefix/folder | `docker-backups/` |
+| `AWS_ACCESS_KEY_ID` | Backblaze B2 key ID | `your_key_id` |
+| `AWS_SECRET_ACCESS_KEY` | Backblaze B2 application key | `your_app_key` |
+| `AWS_REGION` | Backblaze B2 region | `us-west-004` |
 
 ### Telegram Bot Setup
 
@@ -65,6 +66,41 @@ Copy `.env.example` to `.env` and configure:
    - Visit: `https://api.telegram.org/bot<TOKEN>/getUpdates`
    - Find your chat ID in the response
 
+### Backblaze B2 Setup (Required)
+
+All backup files are stored in Backblaze B2 cloud storage:
+
+1. **Sign up for Backblaze B2**:
+   - Visit [backblaze.com/b2](https://www.backblaze.com/b2/cloud-storage.html)
+   - Create account (10GB free tier)
+
+2. **Create B2 bucket**:
+   - Go to B2 Cloud Storage → Buckets
+   - Create new bucket with unique name
+   - Note the bucket name and region
+
+3. **Create App Key**:
+   - Go to Account → App Keys
+   - Create new key with read/write access to your bucket
+   - Save the `keyID` and `applicationKey`
+
+4. **Configure in `.env`**:
+   ```bash
+   S3_ENABLED=true
+   S3_BUCKET=your-bucket-name
+   AWS_ACCESS_KEY_ID=your_key_id
+   AWS_SECRET_ACCESS_KEY=your_application_key
+   AWS_REGION=us-west-004  # Your B2 region
+   ```
+
+**Backblaze B2 Regions:**
+- `us-west-001` (US West - Oregon)
+- `us-west-002` (US West - California)  
+- `us-west-004` (US West - Arizona)
+- `us-east-001` (US East - Virginia)
+- `eu-central-003` (EU - Amsterdam)
+- `ap-southeast-002` (Asia Pacific - Singapore)
+
 ## How It Works
 
 ### Backup Process
@@ -73,8 +109,11 @@ Copy `.env.example` to `.env` and configure:
 2. **Volume Filtering**: Only processes containers with volumes in `ROOT_DIR`
 3. **Database Dumps**: Creates SQL dumps before file backup
 4. **Volume Compression**: Compresses each volume directory into `.tar.gz`
-5. **Telegram Delivery**: Sends all backup files via Telegram
-6. **Cleanup**: Removes temporary files
+5. **File Storage**: 
+   - All backup files → Backblaze B2 cloud storage
+   - Download links sent via Telegram (7-day expiry)
+6. **Summary Report**: Detailed Telegram message with download links
+7. **Cleanup**: Removes temporary files
 
 ### Supported Databases
 
@@ -89,79 +128,60 @@ Copy `.env.example` to `.env` and configure:
 backup/
 ├── main.py                    # Main backup script
 ├── requirements.txt           # Python dependencies
-├── .env                       # Configuration (create from .env.example)
-├── .env.example               # Environment template
+├── Dockerfile                 # Docker image definition
+├── docker-compose.yml         # Docker Compose orchestration  
+├── docker-entrypoint.sh       # Container startup script
+├── docker-setup.sh            # Automated Docker setup
+├── .env.docker               # Environment configuration template
 ├── .gitignore                 # Git ignore rules
-├── setup_venv.sh              # Virtual environment setup
-├── setup_cron_venv.sh         # Cron setup with venv
-├── activate.sh                # Helper to activate venv
 ├── README.md                  # This file
-├── README_CRON.md             # Cron-specific documentation
 └── backup_state.json          # Incremental backup state (auto-generated)
 ```
 
 ## Usage Examples
 
-### Manual Backup
+### Docker Service Management
 
-**Direct script run**
 ```bash
-# Activate virtual environment
-source backup_env/bin/activate
+# View status
+docker compose ps
 
-# Run backup
-python main.py
+# View live logs  
+docker compose logs -f
 
-# Deactivate when done
-deactivate
-```
+# Manual backup test
+docker compose exec docker-backup python /app/main.py
 
+# Restart service
+docker compose restart
 
-### Scheduled Backup
-```bash
-# Setup daily backup at 2 AM (with virtual environment)
-./setup_cron_venv.sh
+# Stop service
+docker compose down
 
-# View cron jobs
-crontab -l
-
-# View logs
-tail -f cron.log
-```
-
-### Custom Schedule
-```bash
-# Edit crontab manually
-crontab -e
-
-# Add custom schedule (every 6 hours)
-0 */6 * * * cd /path/to/backup && python3 main.py >> cron.log 2>&1
+# Update and restart
+git pull && docker compose up -d --build
 ```
 
 ## Monitoring
 
 ### Log Files
-- **Application logs**: Timestamped files in temp directory
-- **Cron logs**: `cron.log` in script directory
-- **Telegram delivery**: Logs sent to Telegram chat
+- **Container logs**: `docker compose logs -f`
+- **Application logs**: Inside container at `/app/logs/`
+- **Health endpoint**: `curl http://localhost:8080/health`
 
 ### Health Checks
 ```bash
-# Check last backup
-ls -la /tmp/backup_logs/
+# Check service health
+docker compose ps
 
-# Monitor cron logs
-tail -f cron.log
+# Monitor logs in real-time
+docker compose logs -f docker-backup
 
-# Test Telegram connectivity
-python -c "
-import telebot
-from dotenv import load_dotenv
-import os
-load_dotenv()
-bot = telebot.TeleBot(os.environ.get('BOT_TOKEN'))
-bot.send_message(os.environ.get('BOT_DEST'), 'Test message')
-"
+# Check health endpoint
+curl http://localhost:8080/health
+
+# View backup state
+docker compose exec docker-backup cat /app/backup_state.json
 ```
 
 ## Security Considerations
@@ -177,14 +197,14 @@ bot.send_message(os.environ.get('BOT_DEST'), 'Test message')
 
 ### Common Issues
 
-1. **Python environment issues**:
+1. **Docker environment issues**:
    ```bash
-   # Install required system packages
-   sudo apt update
-   sudo apt install python3 python3-venv python3-pip python3-full
+   # Check Docker installation
+   docker --version
+   docker compose --version
    
-   # Recreate virtual environment
-   ./setup_venv.sh
+   # Restart Docker service
+   sudo systemctl restart docker
    ```
 
 2. **Docker permission denied**:
@@ -208,11 +228,26 @@ bot.send_message(os.environ.get('BOT_DEST'), 'Test message')
    - Check database user permissions
    - Review container logs: `docker logs <container>`
 
+6. **Backblaze B2 upload failures**:
+   - Verify B2 credentials and bucket name
+   - Check B2 region configuration  
+   - Test connection: `docker compose logs docker-backup`
+   - Ensure bucket has read/write permissions
+
+7. **Docker service issues**:
+   - Check service status: `docker compose ps`
+   - View logs: `docker compose logs -f`
+   - Restart service: `docker compose restart`
+   - Manual backup test: `docker compose exec docker-backup python /app/main.py`
+
 
 ### Debug Mode
 ```bash
-# Run with verbose logging
-python main.py 2>&1 | tee debug.log
+# Run backup manually with verbose output
+docker compose exec docker-backup python /app/main.py
+
+# View detailed container logs
+docker compose logs -f docker-backup
 ```
 
 ## Contributing

@@ -6,6 +6,8 @@ import telebot
 import subprocess
 import json
 import hashlib
+import boto3
+from botocore.exceptions import ClientError, NoCredentialsError
 from dotenv import load_dotenv
 
 # Load environment variables from .env file if it exists
@@ -63,7 +65,7 @@ if not TMP_DIR:
 TMP_DIR = os.path.join(TMP_DIR, datetime.now().strftime("%Y%m%d_%H%M%S"))
 if not os.path.exists(TMP_DIR):
     try:
-        os.mkdir(TMP_DIR)
+        os.makedirs(TMP_DIR, exist_ok=True)
     except Exception as retEx:
         logging.error("Cannot create temporary folder: [%s]. Defaulting to current folder", str(retEx))
         TMP_DIR = os.getcwd()
@@ -77,6 +79,22 @@ logging.debug("BACKUP_STATE_FILE: [%s]", BACKUP_STATE_FILE)
 DB_CONTAINERS = os.environ.get('DB_CONTAINERS', '').split(',') if os.environ.get('DB_CONTAINERS') else []
 DB_CONTAINERS = [container.strip() for container in DB_CONTAINERS if container.strip()]
 logging.debug("DB_CONTAINERS: [%s]", DB_CONTAINERS)
+
+# S3 configuration
+S3_ENABLED = os.environ.get('S3_ENABLED', 'false').lower() == 'true'
+S3_BUCKET = os.environ.get('S3_BUCKET')
+S3_PREFIX = os.environ.get('S3_PREFIX', 'docker-backups/')
+AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY')
+AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
+LARGE_FILE_THRESHOLD = int(os.environ.get('LARGE_FILE_THRESHOLD', '45'))  # MB
+
+logging.debug("S3_ENABLED: [%s]", S3_ENABLED)
+if S3_ENABLED:
+    logging.debug("S3_BUCKET: [%s]", S3_BUCKET)
+    logging.debug("S3_PREFIX: [%s]", S3_PREFIX)
+    logging.debug("AWS_REGION: [%s]", AWS_REGION)
+    logging.debug("LARGE_FILE_THRESHOLD: [%d MB]", LARGE_FILE_THRESHOLD)
 
 
 
@@ -187,6 +205,80 @@ def volume_needs_backup(volume_path, volume_name, previous_state):
     
     logging.info("Volume [%s] - no changes detected, skipping backup", volume_name)
     return False, current_info
+
+# Function to initialize S3 client
+def get_s3_client():
+    """Initialize and return S3 client"""
+    try:
+        # Configure for Backblaze B2 S3-compatible API
+        endpoint_url = os.environ.get('AWS_ENDPOINT_URL', f'https://s3.{AWS_REGION}.backblazeb2.com')
+        
+        if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
+            s3_client = boto3.client(
+                's3',
+                endpoint_url=endpoint_url,
+                aws_access_key_id=AWS_ACCESS_KEY_ID,
+                aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+                region_name=AWS_REGION
+            )
+        else:
+            # Use instance profile or default credentials
+            s3_client = boto3.client('s3', endpoint_url=endpoint_url, region_name=AWS_REGION)
+        
+        # Test connection
+        s3_client.head_bucket(Bucket=S3_BUCKET)
+        return s3_client
+    except NoCredentialsError:
+        logging.error("AWS credentials not found")
+        return None
+    except ClientError as e:
+        logging.error("S3 connection error: %s", str(e))
+        return None
+    except Exception as e:
+        logging.error("S3 client initialization error: %s", str(e))
+        return None
+
+# Function to upload file to S3
+def upload_to_s3(file_path, s3_key):
+    """Upload file to S3 bucket"""
+    try:
+        s3_client = get_s3_client()
+        if not s3_client:
+            return False, "S3 client initialization failed"
+        
+        file_size = os.path.getsize(file_path)
+        file_size_mb = file_size / (1024 * 1024)
+        
+        logging.info("Uploading to S3: [%s] (%.1f MB)", s3_key, file_size_mb)
+        
+        s3_client.upload_file(file_path, S3_BUCKET, s3_key)
+        
+        # Generate presigned URL for download (expires in 7 days)
+        download_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': S3_BUCKET, 'Key': s3_key},
+            ExpiresIn=7*24*3600  # 7 days
+        )
+        
+        logging.info("Successfully uploaded to S3: [%s]", s3_key)
+        return True, download_url
+        
+    except ClientError as e:
+        error_msg = f"S3 upload failed: {str(e)}"
+        logging.error(error_msg)
+        return False, error_msg
+    except Exception as e:
+        error_msg = f"Upload error: {str(e)}"
+        logging.error(error_msg)
+        return False, error_msg
+
+# Function to get file size in MB
+def get_file_size_mb(file_path):
+    """Get file size in MB"""
+    try:
+        return os.path.getsize(file_path) / (1024 * 1024)
+    except OSError:
+        return 0
 
 # Function to compress a folder
 def MakeTar(source_dir, output_filename):
@@ -322,7 +414,7 @@ if __name__ == '__main__':
     # Create temporary output path
     if not os.path.exists(TMP_DIR):
         logging.info("Creating: [" + TMP_DIR + "] folder")
-        os.mkdir(TMP_DIR)
+        os.makedirs(TMP_DIR, exist_ok=True)
     else:
         logging.warning("Folder: [" + TMP_DIR + "] already exists, this could cause some troubles")
     
@@ -379,6 +471,10 @@ if __name__ == '__main__':
     previous_state = load_backup_state()
     current_state = previous_state.copy()  # Start with previous state
     
+    # Track backup results
+    s3_files = []
+    failed_files = []
+    
     # Process path(s) list
     for singleLocation in DOCKER_VOLUME_DIRECTORIES:
         try:
@@ -411,17 +507,44 @@ if __name__ == '__main__':
                 logging.info("Backing up changed volume: [%s]", singleSubfolder)
                 if (MakeTar(folderToCompress, outputPath)):
                     logging.info("Successfully compressed: [" + outputPath + "]")
-                    # Send archive
-                    try:
-                        bot.send_document(TELEGRAM_DEST_CHAT, open(outputPath, 'rb'))
-                        logging.info("Document: [" + outputPath + "] was sent successfully")
-                        # Only update state after successful backup and transmission
+                    
+                    # Send ALL files to S3, no Telegram file uploads
+                    file_size_mb = get_file_size_mb(outputPath)
+                    backup_successful = False
+                    
+                    # Upload to S3 if enabled and configured
+                    if S3_ENABLED and S3_BUCKET:
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        s3_key = f"{S3_PREFIX}{singleSubfolder}-{timestamp}.tar.gz"
+                        
+                        success, result = upload_to_s3(outputPath, s3_key)
+                        if success:
+                            s3_files.append({
+                                'name': singleSubfolder,
+                                'size_mb': file_size_mb,
+                                'method': 's3',
+                                'url': result,
+                                's3_key': s3_key
+                            })
+                            backup_successful = True
+                            logging.info("Document uploaded to S3: [%s] (%.1f MB)", singleSubfolder, file_size_mb)
+                        else:
+                            logging.error("S3 upload failed: %s", result)
+                    else:
+                        logging.warning("S3 not configured - file [%s] cannot be uploaded", singleSubfolder)
+                    
+                    # Update state only if backup was successful
+                    if backup_successful:
                         current_state[singleSubfolder] = {**volume_info, 'last_backup': datetime.now().isoformat()}
-                    except Exception as retEx:
-                        logging.error("Cannot send document: [" + str(retEx) + "]")
-                        # Don't update state if transmission failed
+                    else:
+                        failed_files.append({
+                            'name': singleSubfolder,
+                            'size_mb': file_size_mb,
+                            'reason': 'S3 upload failed or not configured'
+                        })
                         if volume_info:
                             current_state[singleSubfolder] = volume_info
+                    
                     # Delete archive
                     try:
                         os.remove(outputPath)
@@ -430,6 +553,11 @@ if __name__ == '__main__':
                         logging.error("Error while deleting: [" + str(retEx) + "]")
                 else:
                     logging.error("Cannot compress: [" + outputPath + "]")
+                    failed_files.append({
+                        'name': singleSubfolder,
+                        'size_mb': 0,
+                        'reason': 'Compression failed'
+                    })
                     # Don't update state if compression failed
                     if volume_info:
                         current_state[singleSubfolder] = volume_info
@@ -437,38 +565,54 @@ if __name__ == '__main__':
     # Save updated backup state
     save_backup_state(current_state)
     
-    # Send summary message to Telegram
-    backed_up_volumes = [vol for vol, info in current_state.items() 
-                        if info and 'last_backup' in info]
+    # Send enhanced summary message to Telegram
     skipped_volumes = [vol for vol, info in current_state.items() 
                       if info and 'last_backup' not in info]
     
     summary_message = f"🔄 **Backup Summary**\n\n"
     
-    if backed_up_volumes:
-        summary_message += f"✅ **Backed up volumes ({len(backed_up_volumes)}):**\n"
-        for vol in backed_up_volumes:
-            size_mb = current_state[vol]['size'] / (1024 * 1024)
-            file_count = current_state[vol]['file_count']
-            summary_message += f"• `{vol}` ({size_mb:.1f} MB, {file_count} files)\n"
+    # S3 files
+    if s3_files:
+        summary_message += f"☁️ **Uploaded to Backblaze B2 ({len(s3_files)}):**\n"
+        for file_info in s3_files:
+            summary_message += f"• `{file_info['name']}` ({file_info['size_mb']:.1f} MB)\n"
         summary_message += "\n"
     
+    # Failed files
+    if failed_files:
+        summary_message += f"❌ **Failed backups ({len(failed_files)}):**\n"
+        for file_info in failed_files:
+            summary_message += f"• `{file_info['name']}` - {file_info['reason']}\n"
+        summary_message += "\n"
+    
+    # Skipped files
     if skipped_volumes:
-        summary_message += f"⏭️ **Skipped volumes ({len(skipped_volumes)}) - no changes:**\n"
+        summary_message += f"⏭️ **Skipped - no changes ({len(skipped_volumes)}):**\n"
         for vol in skipped_volumes:
             size_mb = current_state[vol]['size'] / (1024 * 1024)
             summary_message += f"• `{vol}` ({size_mb:.1f} MB)\n"
         summary_message += "\n"
     
-    if not backed_up_volumes and not skipped_volumes:
-        summary_message += "ℹ️ No volumes found to process.\n\n"
-    
-    # Add database info if any were dumped
+    # Database dumps
     if dumped_containers:
         summary_message += f"🗄️ **Database dumps ({len(dumped_containers)}):**\n"
         for container in dumped_containers:
             summary_message += f"• `{container}`\n"
         summary_message += "\n"
+    
+    # B2 download links
+    if s3_files:
+        summary_message += f"🔗 **Download Links (7-day expiry):**\n"
+        for file_info in s3_files:
+            summary_message += f"[{file_info['name']}]({file_info['url']})\n"
+        summary_message += "\n"
+    
+    # Summary stats
+    total_backed_up = len(s3_files)
+    total_size_mb = sum(f['size_mb'] for f in s3_files)
+    
+    if total_backed_up > 0:
+        summary_message += f"📊 **Total: {total_backed_up} files ({total_size_mb:.1f} MB)**\n"
     
     summary_message += f"📅 Completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     
