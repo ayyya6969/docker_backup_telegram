@@ -25,7 +25,7 @@ COPY .env.docker .
 RUN mkdir -p /app/backups /app/logs
 
 # Create cron job file
-RUN echo "0 2 * * * cd /app && python3 main.py >> /app/logs/cron.log 2>&1" > /etc/cron.d/docker-backup
+RUN echo "0 2 * * * cd /app && /usr/local/bin/python3 main.py >> /app/logs/cron.log 2>&1" > /etc/cron.d/docker-backup
 
 # Give execution rights on the cron job
 RUN chmod 0644 /etc/cron.d/docker-backup
