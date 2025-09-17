@@ -52,6 +52,11 @@ if [ "$S3_ENABLED" = "true" ]; then
     echo "✅ Backblaze B2 configuration validated"
 fi
 
+# Ensure Python dependencies are installed
+echo "📦 Installing Python dependencies..."
+pip3 install --no-cache-dir -r /app/requirements.txt
+echo "✅ Python dependencies installed"
+
 # Test Docker access
 echo "🐳 Testing Docker access..."
 if ! docker ps >/dev/null 2>&1; then

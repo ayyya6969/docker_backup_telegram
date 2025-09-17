@@ -40,11 +40,7 @@ else:
 bot = telebot.TeleBot(TELEGRAM_API_TOKEN)
 
 # Custom message to send before files list
-TELEGRAM_BACKUP_MESSAGE: str = os.environ.get('CUST_MSG')
-if not TELEGRAM_BACKUP_MESSAGE:
-    TELEGRAM_BACKUP_MESSAGE = "Backup at " + datetime.now().strftime("%Y%m%d_%H%M%S")
-else:
-    TELEGRAM_BACKUP_MESSAGE += "\n\nBackup at " + datetime.now().strftime("%Y%m%d_%H%M%S")
+TELEGRAM_BACKUP_MESSAGE: str = os.environ.get('CUST_MSG', "Docker Backup Started")
 
 # Get volumes root path
 DOCKER_VOLUME_DIRECTORIES: str = os.environ.get('ROOT_DIR')
